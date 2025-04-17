@@ -31,25 +31,52 @@ var userAgents = []string{
 	"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0",
 }
 
-// "jsleak-linkfinder": "(\"|')(((?:[a-zA-Z]{1,10}:\/\/|\/\/)[^\"'/]{1,}\\.[a-zA-Z]{2,}[^\"']{0,})|((/|\\.\\./|\\./)[^\"'><,;| *()(%%$^/\\\\[\]][^\"'><,;|()]{1,})|([a-zA-Z0-9_\\-/]{1,}/[a-zA-Z0-9_\\-/]{1,}\\.([a-zA-Z]{1,4}|action)([\\?|#][^\"|']{0,}|))|([a-zA-Z0-9_\\-/]{1,}/[a-zA-Z0-9_\\-/]{3,}([\\?|#][^\"|']{0,}|))|([a-zA-Z0-9_\\-]{1,}\\.(php|asp|aspx|jsp|json|action|html|js|txt|xml)([\\?|#][^\"|']{0,}|)))(\"|')",
+// ((?:[a-zA-Z]{1,10}://|//)           # Match a scheme [a-Z]*1-10 or //
+//     [^"'/]{1,}\.                        # Match a domainname (any character + dot)
+//     [a-zA-Z]{2,}[^"']{0,})              # The domainextension and/or path
+// "jsleak-linkfinder1": "(?:\"|')?(([a-zA-Z]{1,10}:\\/\\/|\\/\\/)[^\"'\\/]{1,}\\.[a-zA-Z]{2,}[^\"']{0,})(?:\"|')?",
+
+// ((?:/|\.\./|\./)                    # Start with /,../,./
+// [^"'><,;| *()(%%$^/\\\[\]]          # Next character can't be...
+// [^"'><,;|()]{1,})                   # Rest of the characters can't be
+// "jsleak-linkfinder2": "(?:\"|')?((?:\\/|\\.\\.\\/|\\.\\/)[^\"'><,;| *()(%%$^\\/\\\\\\[\\]][^\"'><,;|()]{1,})(?:\"|')?",
+
+// ([a-zA-Z0-9_\-/]{1,}/               # Relative endpoint with /
+//     [a-zA-Z0-9_\-/.]{1,}                # Resource name
+//     \.(?:[a-zA-Z]{1,4}|action)          # Rest + extension (length 1-4 or action)
+//     (?:[\?|#][^"|']{0,}|))              # ? or # mark with parameters
+// "jsleak-linkfinder3": "(?:\"|')?([a-zA-Z0-9_\\-\\/]{1,}\\/[a-zA-Z0-9_\\-\\/.]{1,}\\.(?:[a-zA-Z]{1,4}|action)(?:[\\?|#][^\"|']{0,}|))(?:\"|')?"
+
+// ([a-zA-Z0-9_\-/]{1,}/               # REST API (no extension) with /
+// [a-zA-Z0-9_\-/]{3,}                 # Proper REST endpoints usually have 3+ chars
+// (?:[\?|#][^"|']{0,}|))              # ? or # mark with parameters
+// "jsleak-linkfinder4": "(?:\"|')?([a-zA-Z0-9_\\-\\/]{1,}\\/[a-zA-Z0-9_\\-\\/]{3,}([\\?|#][^\"|']{0,}|))(?:\"|')?"
+
+// ([a-zA-Z0-9_\-]{1,}                 # filename
+//     \.(?:php|asp|aspx|jsp|json|
+//          action|html|js|txt|xml)        # . + extension
+//     (?:[\?|#][^"|']{0,}|))              # ? or # mark with parameters
+// "jsleak-linkfinder5": "(?:\"|')?([a-zA-Z0-9_\\-]{1,}\\.(php|asp|aspx|jsp|json|action|html|js|txt|xml)(?:[\\?|#][^\"|']{0,}|))(?:\"|')?"
+
 var internalJSON = `{
-    "uri1": "(https?:)?//[\\S]{3,50}",
-    "uri2": "(https:)?//[\\S]{3,50}:([\\S]{3,50})@[-.%\\w\\/:]+",
-    "amazon1": "//s3-[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9._-]+",
-    "amazon2": "//s3\\.amazonaws\\.com/[a-z0-9._-]+",
-    "amazon3": "[a-z0-9.-]+\\.s3-[a-z0-9-]\\.amazonaws\\.com",
-    "amazon4": "[a-z0-9.-]+\\.s3-website[.-](eu|ap|us|ca|sa|cn)",
-    "amazon5": "[a-z0-9.-]+\\.s3\\.amazonaws\\.com",
-    "amazon6": "amzn\\.mws\\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-    "firebase1": "[a-z0-9.-]+\\.firebaseio\\.com",
-    "firebase2": "[a-z0-9.-]+\\.firebaseapp\\.com",
-    "password_in_url": "[a-zA-Z]{3,10}://[^/\\s:@]{3,20}:[^/\\s:@]{3,20}@.{1,100}[\"'\\s]",
-    "grafanaserviceaccount2": "([a-zA-Z0-9-]+\\.grafana\\.net)",
-    "azurewebsites1": "([a-z0-9-]+(?:\\.[a-z0-9-]+)*\\.(azurewebsites\\.net))",
-    "azurefunctionkey": "https:\\/\\/([a-zA-Z0-9-]{2,30})\\.azurewebsites\\.net\\/api\\/([a-zA-Z0-9-]{2,30})",
-    "azurecontainerregistry1": "([a-zA-Z0-9-]{1,100})\\.azurecr\\.io",
-    "artifactory2": "([A-Za-z0-9](?:[A-Za-z0-9\\-]{0,61}[A-Za-z0-9])\\.jfrog\\.io)",
-    "salesforce2": "https://[0-9a-zA-Z-\\.]{1,100}\\.my\\.salesforce\\.com"
+	"jsleak-linkfinder": "(?:\"|')?(([a-zA-Z]{1,10}:\\/\\/|\\/\\/)[^\"'\\/]{1,}\\.[a-zA-Z]{2,}[^\"']{0,})|((?:\\/|\\.\\.\\/|\\.\\/)[^\"'><,;| *()(%%$^\\/\\\\\\[\\]][^\"'><,;|()]{1,})|([a-zA-Z0-9_\\-\\/]{1,}\\/[a-zA-Z0-9_\\-\\/.]{1,}\\.(?:[a-zA-Z]{1,4}|action)(?:[\\?|#][^\"|']{0,}|))|([a-zA-Z0-9_\\-\\/]{1,}\\/[a-zA-Z0-9_\\-\\/]{3,}([\\?|#][^\"|']{0,}|))|([a-zA-Z0-9_\\-]{1,}\\.(php|asp|aspx|jsp|json|action|html|js|txt|xml)(?:[\\?|#][^\"|']{0,}|))(?:\"|')?",
+	"uri1": "(https?:\\/\\/|\\/\\/)([a-zA-Z0-9\\-_\\.@]{3,256})?(\\/[^\\s\"'<>]*)?",
+	"uri2": "[a-zA-Z]{3,10}://([a-zA-Z0-9\\-_\\.@]{3,256})?(\\/[^\\s\"'<>]*)?",
+	"password_in_url": "[a-zA-Z]{3,10}://[^/\\s:@]{3,20}:[^/\\s:@]{3,20}@.{1,100}[\"'\\s]",
+	"amazon1": "//s3-[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9._-]+",
+	"amazon2": "//s3\\.amazonaws\\.com/[a-z0-9._-]+",
+	"amazon3": "[a-z0-9.-]+\\.s3-[a-z0-9-]\\.amazonaws\\.com",
+	"amazon4": "[a-z0-9.-]+\\.s3-website[.-](eu|ap|us|ca|sa|cn)",
+	"amazon5": "[a-z0-9.-]+\\.s3\\.amazonaws\\.com",
+	"amazon6": "amzn\\.mws\\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+	"firebase1": "[a-z0-9.-]+\\.firebaseio\\.com",
+	"firebase2": "[a-z0-9.-]+\\.firebaseapp\\.com",
+	"grafanaserviceaccount2": "([a-zA-Z0-9-]+\\.grafana\\.net)",
+	"azurewebsites1": "([a-z0-9-]+(\\.[a-z0-9-]+)*\\.(azurewebsites\\.net))",
+	"azurefunctionkey": "(https?:\\/\\/|\\/\\/)?([a-zA-Z0-9-]{2,30})\\.azurewebsites\\.net\\/api\\/([a-zA-Z0-9-]{2,30})",
+	"azurecontainerregistry1": "([a-zA-Z0-9-]{1,100})\\.azurecr\\.io",
+	"artifactory2": "([A-Za-z0-9]([A-Za-z0-9\\-]{0,61}[A-Za-z0-9])\\.jfrog\\.io)",
+	"salesforce2": "(https?:\\/\\/|\\/\\/)?[0-9a-zA-Z-\\.]{1,100}\\.my\\.salesforce\\.com"
 }`
 
 func parseInternalJSON() []patternDef {
@@ -135,6 +162,7 @@ func request(fullurl, header string, timeout time.Duration) (string, *http.Respo
 		fmt.Fprintf(os.Stderr, "failed reading body: %v\n", err)
 		return "", resp
 	}
+	// print(string(body))
 	return string(body), resp
 }
 
@@ -143,11 +171,23 @@ func regexGrep(content string, baseURL string, patterns []patternDef, resolvePat
 	var result []string
 	for _, p := range patterns {
 		r := regexp.MustCompile(p.Regex)
+		//fmt.Println(content)
+		// fmt.Println("Regex: ", r.String())
 		matches := r.FindAllString(content, -1)
+		//fmt.Println(matches)
 		for _, m := range matches {
+			// Sanitize match and replace all "
+			// If "https:// is not seen as absolute url in the if below
+			m = strings.ReplaceAll(m, "\"", "")
+
 			if _, seen := found[m]; !seen {
 				if resolvePath && !strings.HasPrefix(m, "http://") && !strings.HasPrefix(m, "https://") && !strings.HasPrefix(m, "//") {
-					fmt.Printf("%s%s\n", baseURL, m)
+					if strings.HasPrefix(m, "/") {
+						fmt.Printf("%s%s\n", baseURL, m)
+					} else {
+						fmt.Printf("%s/%s\n", baseURL, m)
+					}
+
 				} else {
 					fmt.Println(m)
 				}
@@ -179,7 +219,10 @@ func main() {
 
 	allPatterns := parseInternalJSON()
 	if jsonFilePath != "" {
-		allPatterns = append(allPatterns, loadPatternsFromJSON(jsonFilePath)...)
+		// append
+		//allPatterns = append(allPatterns, loadPatternsFromJSON(jsonFilePath)...)
+		// We want to replace the whole file
+		allPatterns = loadPatternsFromJSON(jsonFilePath)
 	}
 
 	urlList := make(chan string, concurrency)
