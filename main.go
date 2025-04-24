@@ -210,7 +210,7 @@ func main() {
 
 	flag.IntVar(&timeout, "timeout", 10, "Timeout in seconds for HTTP requests")
 	flag.StringVar(&jsonFilePath, "json", "", "Path to JSON file containing additional regex patterns")
-	flag.StringVar(&header, "H", "", "Custom header, e.g., -H 'User-Agent: xyz'")
+	flag.StringVar(&header, "H", "User-Agent: Chrome", "Custom header, e.g., -H 'User-Agent: xyz'")
 	flag.BoolVar(&checkStatus, "checkstatus", false, "Check and print HTTP status of discovered links")
 	flag.IntVar(&concurrency, "c", 10, "Concurrency level")
 	flag.StringVar(&input, "url", "", "URL or file path to process")
