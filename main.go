@@ -213,7 +213,7 @@ func main() {
 	flag.StringVar(&header, "H", "User-Agent: Chrome", "Custom header, e.g., -H 'User-Agent: xyz'")
 	flag.BoolVar(&checkStatus, "checkstatus", false, "Check and print HTTP status of discovered links")
 	flag.IntVar(&concurrency, "c", 10, "Concurrency level")
-	flag.StringVar(&input, "url", "", "URL or file path to process")
+	flag.StringVar(&input, "u", "", "URL or file path to process")
 	flag.BoolVar(&resolvePath, "r", false, "Resolve relative paths against base URL")
 	flag.Parse()
 
