@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/playwright-community/playwright-go"
 )
 
 type patternDef struct {
@@ -118,6 +120,58 @@ func loadPatternsFromJSON(filePath string) []patternDef {
 	return patterns
 }
 
+func getRenderedContentWithPlaywright(fullurl string, header string, timeout time.Duration) (string, error) {
+	pw, err := playwright.Run()
+	if err != nil {
+		return "", fmt.Errorf("could not launch playwright: %v", err)
+	}
+	defer pw.Stop()
+
+	// Launch the browser with headless mode
+	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
+		Headless: playwright.Bool(true),
+	})
+	if err != nil {
+		return "", fmt.Errorf("could not launch browser: %v", err)
+	}
+	defer browser.Close()
+
+	// Create a new page
+	page, err := browser.NewPage(playwright.BrowserNewPageOptions{})
+	if err != nil {
+		return "", fmt.Errorf("could not create page: %v", err)
+	}
+
+	// Set custom header if provided
+	if header != "" {
+		parts := strings.SplitN(header, ":", 2)
+		if len(parts) == 2 {
+			page.SetExtraHTTPHeaders(map[string]string{
+				strings.TrimSpace(parts[0]): strings.TrimSpace(parts[1]),
+			})
+		}
+	}
+
+	// Navigate to the URL with timeout and wait until network is idle
+	_, err = page.Goto(fullurl, playwright.PageGotoOptions{
+		Timeout:   playwright.Float(float64(timeout.Milliseconds())),
+		WaitUntil: playwright.WaitUntilStateNetworkidle,
+	})
+	if err != nil {
+		return "", fmt.Errorf("could not navigate to page: %v", err)
+	}
+
+	// Get the rendered content of the page
+	content, err := page.Content()
+	if err != nil {
+		return "", fmt.Errorf("could not get page content: %v", err)
+	}
+
+	fmt.Println(content)
+
+	return content, nil
+}
+
 func request(fullurl, header string, timeout time.Duration) (string, *http.Response) {
 	ua := userAgents[rand.Intn(len(userAgents))]
 
@@ -208,14 +262,16 @@ func main() {
 	var concurrency int
 	var input string
 	var resolvePath bool
+	var noHeadlessMode bool
 
-	flag.IntVar(&timeout, "timeout", 10, "Timeout in seconds for HTTP requests")
+	flag.IntVar(&timeout, "timeout", 7, "Timeout in seconds for HTTP requests")
 	flag.StringVar(&jsonFilePath, "json", "", "Path to JSON file containing additional regex patterns")
 	flag.StringVar(&header, "H", "User-Agent: Chrome", "Custom header, e.g., -H 'User-Agent: xyz'")
 	flag.BoolVar(&checkStatus, "checkstatus", false, "Check and print HTTP status of discovered links")
-	flag.IntVar(&concurrency, "c", 10, "Concurrency level")
+	flag.IntVar(&concurrency, "c", 3, "Concurrency level (default 3)")
 	flag.StringVar(&input, "u", "", "URL or file path to process")
 	flag.BoolVar(&resolvePath, "r", false, "Resolve relative paths against base URL")
+	flag.BoolVar(&noHeadlessMode, "noheadless", false, "Disables headless mode")
 	flag.Parse()
 
 	allPatterns := parseInternalJSON()
@@ -248,12 +304,24 @@ func main() {
 	}()
 
 	wg := sync.WaitGroup{}
+	var content = ""
+	var err error
+
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for inputURL := range urlList {
-				content, _ := request(inputURL, header, time.Duration(timeout)*time.Second)
+
+				if noHeadlessMode {
+					content, _ = request(inputURL, header, time.Duration(timeout)*time.Second)
+				} else {
+					content, err = getRenderedContentWithPlaywright(inputURL, header, time.Duration(timeout)*time.Second)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "playwright error: %v\n", err)
+						continue
+					}
+				}
 				matches := regexGrep(content, inputURL, allPatterns, resolvePath)
 				if checkStatus {
 					for _, m := range matches {
