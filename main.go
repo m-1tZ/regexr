@@ -120,26 +120,24 @@ func loadPatternsFromJSON(filePath string) []patternDef {
 	return patterns
 }
 
-func getRenderedContentWithPlaywright(fullurl string, header string, timeout time.Duration) (string, error) {
+func getRenderedContentWithPlaywright(fullurl string, header string, timeout time.Duration) (string, int, error) {
 	pw, err := playwright.Run()
 	if err != nil {
-		return "", fmt.Errorf("could not launch playwright: %v", err)
+		return "", 0, fmt.Errorf("could not launch playwright: %v", err)
 	}
 	defer pw.Stop()
 
-	// Launch the browser with headless mode
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		Headless: playwright.Bool(true),
 	})
 	if err != nil {
-		return "", fmt.Errorf("could not launch browser: %v", err)
+		return "", 0, fmt.Errorf("could not launch browser: %v", err)
 	}
 	defer browser.Close()
 
-	// Create a new page
-	page, err := browser.NewPage(playwright.BrowserNewPageOptions{})
+	page, err := browser.NewPage()
 	if err != nil {
-		return "", fmt.Errorf("could not create page: %v", err)
+		return "", 0, fmt.Errorf("could not create page: %v", err)
 	}
 
 	// Set custom header if provided
@@ -152,24 +150,25 @@ func getRenderedContentWithPlaywright(fullurl string, header string, timeout tim
 		}
 	}
 
-	// Navigate to the URL with timeout and wait until network is idle
-	_, err = page.Goto(fullurl, playwright.PageGotoOptions{
+	// Navigate and capture the response
+	response, err := page.Goto(fullurl, playwright.PageGotoOptions{
 		Timeout:   playwright.Float(float64(timeout.Milliseconds())),
 		WaitUntil: playwright.WaitUntilStateNetworkidle,
 	})
 	if err != nil {
-		return "", fmt.Errorf("could not navigate to page: %v", err)
+		return "", 0, fmt.Errorf("could not navigate to page: %v", err)
 	}
 
-	// Get the rendered content of the page
+	// Get status code
+	status := response.Status()
+
+	// Get the rendered content
 	content, err := page.Content()
 	if err != nil {
-		return "", fmt.Errorf("could not get page content: %v", err)
+		return "", status, fmt.Errorf("could not get page content: %v", err)
 	}
 
-	fmt.Println(content)
-
-	return content, nil
+	return content, status, nil
 }
 
 func request(fullurl, header string, timeout time.Duration) (string, *http.Response) {
@@ -217,7 +216,7 @@ func request(fullurl, header string, timeout time.Duration) (string, *http.Respo
 		fmt.Fprintf(os.Stderr, "failed reading body: %v\n", err)
 		return "", resp
 	}
-	// print(string(body))
+	//print(string(body))
 	return string(body), resp
 }
 
@@ -316,7 +315,7 @@ func main() {
 				if noHeadlessMode {
 					content, _ = request(inputURL, header, time.Duration(timeout)*time.Second)
 				} else {
-					content, err = getRenderedContentWithPlaywright(inputURL, header, time.Duration(timeout)*time.Second)
+					content, _, err = getRenderedContentWithPlaywright(inputURL, header, time.Duration(timeout)*time.Second)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "playwright error: %v\n", err)
 						continue
@@ -336,6 +335,7 @@ func main() {
 							}
 							u = base.ResolveReference(u)
 						}
+
 						_, resp := request(u.String(), header, time.Duration(timeout)*time.Second)
 						if resp != nil {
 							fmt.Printf("[Status] %s -> %d\n", u.String(), resp.StatusCode)
