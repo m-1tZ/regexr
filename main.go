@@ -267,7 +267,7 @@ func main() {
 	flag.StringVar(&jsonFilePath, "json", "", "Path to JSON file containing additional regex patterns")
 	flag.StringVar(&header, "H", "User-Agent: Chrome", "Custom header, e.g., -H 'User-Agent: xyz'")
 	flag.BoolVar(&checkStatus, "checkstatus", false, "Check and print HTTP status of discovered links")
-	flag.IntVar(&concurrency, "c", 3, "Concurrency level (default 3)")
+	flag.IntVar(&concurrency, "c", 3, "Concurrency level")
 	flag.StringVar(&input, "u", "", "URL or file path to process")
 	flag.BoolVar(&resolvePath, "r", false, "Resolve relative paths against base URL")
 	flag.BoolVar(&noHeadlessMode, "noheadless", false, "Disables headless mode")
