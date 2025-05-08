@@ -1,5 +1,7 @@
 # Regexr
 
+`go install github.com/m-1tZ/regexr@latest`
+
 Yet another regex pattern detection tool that comes along with built-in headless support with playwright-go.
 
 ```
