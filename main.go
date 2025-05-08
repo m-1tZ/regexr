@@ -79,7 +79,9 @@ var internalJSON = `{
 	"azurecontainerregistry1": "([a-zA-Z0-9-]{1,100})\\.azurecr\\.io",
 	"artifactory2": "([A-Za-z0-9]([A-Za-z0-9\\-]{0,61}[A-Za-z0-9])\\.jfrog\\.io)",
 	"salesforce2": "(https?:\\/\\/|\\/\\/)?[0-9a-zA-Z-\\.]{1,100}\\.my\\.salesforce\\.com",
-	"databrickstoken1": "([a-z0-9-]+(?:\\.[a-z0-9-]+)*\\.(cloud\\.databricks\\.com|gcp\\.databricks\\.com|azurewebsites\\.net))"
+	"databrickstoken1": "([a-z0-9-]+(?:\\.[a-z0-9-]+)*\\.(cloud\\.databricks\\.com|gcp\\.databricks\\.com|azurewebsites\\.net))",
+	"jsdelivr":"(https?:\\/\\/|\\/\\/)cdn\\.jsdelivr\\.net\\/(npm|gh)\\/[^@\"<>\\?\\\\'\\s]+@?[^@\"<>\\?\\\\'\\s]+",
+	"unpkg":"(https?:\\/\\/|\\/\\/)unpkg\\.com\\/[^@\"<>\\?\\\\'\\s]+@?[^@\"<>\\?\\\\'\\s]+"
 }`
 
 func parseInternalJSON() []patternDef {
