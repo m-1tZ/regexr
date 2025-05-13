@@ -141,7 +141,16 @@ func getRenderedContentWithPlaywright(fullurl string, header string, timeout tim
 	}
 	defer browser.Close()
 
-	page, err := browser.NewPage()
+	// Create browser context with IgnoreHTTPSErrors set to true
+	context, err := browser.NewContext(playwright.BrowserNewContextOptions{
+		IgnoreHttpsErrors: playwright.Bool(true),
+	})
+	if err != nil {
+		return "", 0, fmt.Errorf("could not create browser context: %v", err)
+	}
+	defer context.Close()
+
+	page, err := context.NewPage()
 	if err != nil {
 		return "", 0, fmt.Errorf("could not create page: %v", err)
 	}
@@ -150,9 +159,12 @@ func getRenderedContentWithPlaywright(fullurl string, header string, timeout tim
 	if header != "" {
 		parts := strings.SplitN(header, ":", 2)
 		if len(parts) == 2 {
-			page.SetExtraHTTPHeaders(map[string]string{
+			err := page.SetExtraHTTPHeaders(map[string]string{
 				strings.TrimSpace(parts[0]): strings.TrimSpace(parts[1]),
 			})
+			if err != nil {
+				return "", 0, fmt.Errorf("could not set headers: %v", err)
+			}
 		}
 	}
 
@@ -249,7 +261,11 @@ func regexGrep(content string, baseURL string, patterns []patternDef, resolvePat
 					}
 
 				} else {
-					fmt.Println(m)
+					if strings.HasPrefix(m, "//"){
+						fmt.Printf("https:%s\n", m)
+					} else {
+						fmt.Println(m)
+					}
 				}
 				found[m] = struct{}{}
 				result = append(result, m)
