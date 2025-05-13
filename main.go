@@ -60,9 +60,7 @@ var userAgents = []string{
 //     (?:[\?|#][^"|']{0,}|))              # ? or # mark with parameters
 // "jsleak-linkfinder5": "(?:\"|')?([a-zA-Z0-9_\\-]{1,}\\.(php|asp|aspx|jsp|json|action|html|js|txt|xml)(?:[\\?|#][^\"|']{0,}|))(?:\"|')?"
 
-var internalJSON = `{}`
-
-var internalJSON1 = `{
+var internalJSON = `{
 	"jsleak-linkfinder1": "(?:\"|')?(([a-zA-Z]{1,10}:\\/\\/|\\/\\/)[^\"'\\/]{1,}\\.[a-zA-Z]{2,}[^\"']{0,})(?:\"|')?",
 	"jsleak-linkfinder3": "(?:\"|')?([a-zA-Z0-9_\\-\\/]{1,}\\/[a-zA-Z0-9_\\-\\/.]{1,}\\.(?:[a-zA-Z]{1,4}|action)(?:[\\?|#][^\"|']{0,}|))(?:\"|')?",
 	"jsleak-linkfinder4": "(?:\"|')?([a-zA-Z0-9_\\-\\/]{1,}\\/[a-zA-Z0-9_\\-\\/]{3,}([\\?|#][^\"|']{0,}|))(?:\"|')?",
