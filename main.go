@@ -228,16 +228,21 @@ func request(fullurl, header string, timeout time.Duration) (string, *http.Respo
 	return string(body), resp
 }
 
-func regexGrep(content string, baseURL string, patterns []patternDef, resolvePath bool) []string {
+func regexGrep(content string, baseURL string, patterns []patternDef, resolvePath bool, matchInformation bool) []string {
 	found := make(map[string]struct{})
 	var result []string
+
 	for _, p := range patterns {
 		r := regexp.MustCompile(p.Regex)
 		//fmt.Println(content)
 		// fmt.Println("Regex: ", r.String())
-		matches := r.FindAllString(content, -1)
+		matches := r.FindAllStringIndex(content, -1) //r.FindAllString(content, -1)
 		//fmt.Println(matches)
-		for _, m := range matches {
+
+		for _, matchIdx := range matches {
+			start, end := matchIdx[0], matchIdx[1]
+			m := content[start:end]
+
 			// Sanitize match and replace all "
 			// If "https:// is not seen as absolute url in the if below
 			m = strings.ReplaceAll(m, "\"", "")
@@ -253,6 +258,33 @@ func regexGrep(content string, baseURL string, patterns []patternDef, resolvePat
 				} else {
 					fmt.Println(m)
 				}
+
+				// Extra match information
+				if matchInformation {
+					var surroundingChars = 70
+
+					snippetStart := start - surroundingChars
+					if snippetStart < 0 {
+						snippetStart = 0
+					}
+					snippetEnd := end + surroundingChars
+					if snippetEnd > len(content) {
+						snippetEnd = len(content)
+					}
+					snippet := content[snippetStart:snippetEnd]
+
+					// Add markers if truncated
+					if snippetStart > 0 {
+						snippet = "..." + snippet
+					}
+					if snippetEnd < len(content) {
+						snippet = snippet + "..."
+					}
+
+					fmt.Printf("[Match Info] [%s] [%q]\n", baseURL, snippet)
+					// fmt.Printf("    Regex: %s\n", p.Regex)
+				}
+
 				found[m] = struct{}{}
 				result = append(result, m)
 			}
@@ -266,6 +298,7 @@ func main() {
 	var jsonFilePath string
 	var header string
 	var checkStatus bool
+	var matchInformation bool
 	var concurrency int
 	var input string
 	var resolvePath bool
@@ -275,6 +308,7 @@ func main() {
 	flag.StringVar(&jsonFilePath, "json", "", "Path to JSON file containing additional regex patterns")
 	flag.StringVar(&header, "H", "User-Agent: Chrome", "Custom header, e.g., -H 'User-Agent: xyz'")
 	flag.BoolVar(&checkStatus, "checkstatus", false, "Check and print HTTP status of discovered links")
+	flag.BoolVar(&matchInformation, "matchInfo", false, "Print more information about a match")
 	flag.IntVar(&concurrency, "c", 3, "Concurrency level")
 	flag.StringVar(&input, "u", "", "URL or file path to process")
 	flag.BoolVar(&resolvePath, "r", false, "Resolve relative paths against base URL")
@@ -329,7 +363,7 @@ func main() {
 						continue
 					}
 				}
-				matches := regexGrep(content, inputURL, allPatterns, resolvePath)
+				matches := regexGrep(content, inputURL, allPatterns, resolvePath, matchInformation)
 				if checkStatus {
 					for _, m := range matches {
 						u, err := url.Parse(m)
