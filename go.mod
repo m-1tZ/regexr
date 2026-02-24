@@ -2,7 +2,7 @@ module github.com/m-1tZ/regexr
 
 go 1.24.2
 
-require github.com/playwright-community/playwright-go v0.5200.1
+require github.com/playwright-community/playwright-go v0.5700.1
 
 require (
 	github.com/deckarep/golang-set/v2 v2.8.0 // indirect
