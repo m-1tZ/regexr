@@ -7,18 +7,22 @@ Yet another regex pattern detection tool that comes along with built-in headless
 ```
 Usage:
   -H string
-        Custom header, e.g., -H 'User-Agent: xyz' (default "User-Agent: Chrome")
+        Custom header, e.g., -H 'User-Agent: xyz' (default "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36")
   -c int
         Concurrency level (default 3)
   -checkstatus
         Check and print HTTP status of discovered links
   -json string
         Path to JSON file containing additional regex patterns
+  -matchInfo
+        Print more information about a match
   -noheadless
         Disables headless mode
   -r    Resolve relative paths against base URL
+  -substrings string
+        Path to newline-delimited text file of plain substrings to match (# lines and empty lines are ignored)
   -timeout int
-        Timeout in seconds for HTTP requests (default 7)
+        Timeout in seconds for HTTP requests (default 5)
   -u string
         URL or file path to process
 ```
