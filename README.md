@@ -53,3 +53,7 @@ Externally specified regex json file should look like:
 	"unpkg":"(https?:\\/\\/|\\/\\/)unpkg\\.com\\/[^@\"<>\\?\\\\'\\s]+@?[^@\"<>\\?\\\\'\\s]+"
 }
 ```
+
+
+# TODO
+https://www.reddit.com/r/golang/comments/1rlala0/lessons_from_managing_hundreds_of_headless_chrome/

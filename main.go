@@ -47,7 +47,7 @@ var userAgents = []string{
 //     [a-zA-Z0-9_\-/.]{1,}                # Resource name
 //     \.(?:[a-zA-Z]{1,4}|action)          # Rest + extension (length 1-4 or action)
 //     (?:[\?|#][^"|']{0,}|))              # ? or # mark with parameters
-// "jsleak-linkfinder3": "(?:\"|')?([a-zA-Z0-9_\\-\\/]{1,}\\/[a-zA-Z0-9_\\-\\/.]{1,}\\.(?:[a-zA-Z]{1,4}|action)(?:[\\?|#][^\"|']{0,}|))(?:\"|')?"
+// "jsleak-linkfinder3": "(?:\"|')?([a-zA-Z0-9_\\-\\/]{1,}\\/[a-zA-Z0-9_\\-\\/.]{1,}\\.(?:[a-zA-Z]{1,4}|action)(?:[\\?|#][^\"|']{0,}|))(?:\"|')?",
 
 // ([a-zA-Z0-9_\-/]{1,}/               # REST API (no extension) with /
 // [a-zA-Z0-9_\-/]{3,}                 # Proper REST endpoints usually have 3+ chars
@@ -124,6 +124,83 @@ func loadPatternsFromJSON(filePath string) []patternDef {
 		})
 	}
 	return patterns
+}
+
+// loadSubstringsFromFile reads a newline-delimited text file where each line
+// is a plain substring to match (not a regex). Empty lines and lines starting
+// with # are ignored.
+func loadSubstringsFromFile(filePath string) []string {
+	f, err := os.Open(filePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to open substrings file: %v\n", err)
+		return nil
+	}
+	defer f.Close()
+
+	var substrings []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		substrings = append(substrings, line)
+	}
+	return substrings
+}
+
+// substringGrep searches content for each plain substring and prints the
+// matching line (similar output style to regexGrep). Already-seen matches
+// are deduplicated. Returns matched substrings so checkStatus can reuse them.
+func substringGrep(content string, baseURL string, substrings []string, matchInformation bool) []string {
+	found := make(map[string]struct{})
+	var result []string
+
+	for _, sub := range substrings {
+		idx := 0
+		for {
+			pos := strings.Index(content[idx:], sub)
+			if pos == -1 {
+				break
+			}
+			absPos := idx + pos
+
+			// Use the matched substring itself as the dedup key
+			if _, seen := found[sub]; !seen {
+				// Extra match information
+				if matchInformation {
+					var surroundingChars = 70
+
+					snippetStart := absPos - surroundingChars
+					if snippetStart < 0 {
+						snippetStart = 0
+					}
+					snippetEnd := absPos + len(sub) + surroundingChars
+					if snippetEnd > len(content) {
+						snippetEnd = len(content)
+					}
+					snippet := content[snippetStart:snippetEnd]
+
+					// Add markers if truncated
+					if snippetStart > 0 {
+						snippet = "..." + snippet
+					}
+					if snippetEnd < len(content) {
+						snippet = snippet + "..."
+					}
+
+					fmt.Printf("[Match Info] [%s] [%s] [%q]\n", sub, baseURL, snippet)
+				}
+
+				found[sub] = struct{}{}
+				result = append(result, sub)
+			}
+			// Advance past this occurrence to find further ones (all deduped anyway)
+			idx = absPos + len(sub)
+		}
+	}
+	return result
 }
 
 func getRenderedContentWithPlaywright(fullurl string, header string, timeout time.Duration) (string, int, error) {
@@ -317,6 +394,7 @@ func main() {
 	var input string
 	var resolvePath bool
 	var noHeadlessMode bool
+	var substringsFilePath string
 
 	flag.IntVar(&timeout, "timeout", 7, "Timeout in seconds for HTTP requests")
 	flag.StringVar(&jsonFilePath, "json", "", "Path to JSON file containing additional regex patterns")
@@ -327,6 +405,7 @@ func main() {
 	flag.StringVar(&input, "u", "", "URL or file path to process")
 	flag.BoolVar(&resolvePath, "r", false, "Resolve relative paths against base URL")
 	flag.BoolVar(&noHeadlessMode, "noheadless", false, "Disables headless mode")
+	flag.StringVar(&substringsFilePath, "substrings", "", "Path to newline-delimited text file of plain substrings to match (# lines and empty lines are ignored)")
 	flag.Parse()
 
 	allPatterns := parseInternalJSON()
@@ -335,6 +414,12 @@ func main() {
 		//allPatterns = append(allPatterns, loadPatternsFromJSON(jsonFilePath)...)
 		// We want to replace the whole file
 		allPatterns = loadPatternsFromJSON(jsonFilePath)
+	}
+
+	// Load optional plain-substring matchers
+	var substrings []string
+	if substringsFilePath != "" {
+		substrings = loadSubstringsFromFile(substringsFilePath)
 	}
 
 	urlList := make(chan string, concurrency)
@@ -377,7 +462,15 @@ func main() {
 						continue
 					}
 				}
-				matches := regexGrep(content, inputURL, allPatterns, resolvePath, matchInformation)
+				// Use plain-substring matching if a substrings file was provided,
+				// otherwise fall back to regex matching
+				var matches []string
+				if len(substrings) > 0 {
+					matches = substringGrep(content, inputURL, substrings, matchInformation)
+				} else {
+					matches = regexGrep(content, inputURL, allPatterns, resolvePath, matchInformation)
+				}
+
 				if checkStatus {
 					for _, m := range matches {
 						u, err := url.Parse(m)
