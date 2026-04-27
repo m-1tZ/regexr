@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -15,14 +16,16 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/playwright-community/playwright-go"
+	"golang.org/x/term"
 )
 
 type patternDef struct {
-	Name  string `json:"name"`
-	Regex string `json:"value"`
+	Name     string
+	Compiled *regexp.Regexp
 }
 
 var userAgents = []string{
@@ -31,6 +34,166 @@ var userAgents = []string{
 	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/90.0.4430.93 Safari/537.36",
 	"Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko",
 	"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0",
+}
+
+var version = "v0.2.0"
+
+type contentTypeFilterPreset struct {
+	BlockedPrefixes []string
+	BlockedExact    map[string]struct{}
+	BlockedResource map[string]struct{}
+}
+
+var headlessContentTypeFilterPresets = map[string]contentTypeFilterPreset{
+	"off": {
+		BlockedPrefixes: nil,
+		BlockedExact:    map[string]struct{}{},
+		BlockedResource: map[string]struct{}{},
+	},
+	"drop-binary": {
+		BlockedPrefixes: []string{
+			"image/",
+			"audio/",
+			"video/",
+			"font/",
+		},
+		BlockedExact: map[string]struct{}{
+			"application/octet-stream":                      {},
+			"application/pdf":                               {},
+			"application/zip":                               {},
+			"application/gzip":                              {},
+			"application/x-gzip":                            {},
+			"application/x-rar-compressed":                  {},
+			"application/x-7z-compressed":                   {},
+			"application/vnd.microsoft.portable-executable": {},
+		},
+		BlockedResource: map[string]struct{}{
+			"image":     {},
+			"media":     {},
+			"font":      {},
+			"texttrack": {},
+		},
+	},
+}
+
+func shouldAbortHeadlessRequest(req playwright.Request, presetName string) bool {
+	preset, ok := headlessContentTypeFilterPresets[presetName]
+	if !ok {
+		preset = headlessContentTypeFilterPresets["drop-binary"]
+	}
+	if len(preset.BlockedResource) == 0 {
+		return false
+	}
+
+	u := strings.ToLower(req.URL())
+	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+		return false
+	}
+
+	resourceType := strings.ToLower(req.ResourceType())
+	_, blocked := preset.BlockedResource[resourceType]
+	return blocked
+}
+
+func shouldSkipHeadlessContent(contentTypeHeader, presetName string) bool {
+	preset, ok := headlessContentTypeFilterPresets[presetName]
+	if !ok {
+		preset = headlessContentTypeFilterPresets["drop-binary"]
+	}
+	if len(preset.BlockedPrefixes) == 0 && len(preset.BlockedExact) == 0 {
+		return false
+	}
+
+	ct := strings.TrimSpace(strings.ToLower(contentTypeHeader))
+	if ct == "" {
+		return false
+	}
+
+	mediaType, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		mediaType = ct
+	}
+
+	if _, blocked := preset.BlockedExact[mediaType]; blocked {
+		return true
+	}
+	for _, prefix := range preset.BlockedPrefixes {
+		if strings.HasPrefix(mediaType, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func progressSnapshot(processed, total int64, startTime time.Time) (time.Duration, string) {
+	elapsed := time.Since(startTime).Round(time.Second)
+	if processed <= 0 || total <= 0 {
+		return elapsed, "?"
+	}
+	if processed >= total {
+		return elapsed, "0s"
+	}
+	rate := float64(processed) / time.Since(startTime).Seconds()
+	if rate <= 0 {
+		return elapsed, "?"
+	}
+	remaining := float64(total-processed) / rate
+	if remaining < 0 {
+		remaining = 0
+	}
+	return elapsed, time.Duration(remaining * float64(time.Second)).Round(time.Second).String()
+}
+
+func printLiveStats(processed, total int64, startTime time.Time, headlessEnabled bool, headlessContentFilter string, filterStats *headlessFilterStats) {
+	elapsed, eta := progressSnapshot(processed, total, startTime)
+	fmt.Fprintf(os.Stderr, "\n[*] live stats | %d/%d urls | uptime: %s | eta: %s\n", processed, total, elapsed, eta)
+	if headlessEnabled && headlessContentFilter != "off" && filterStats != nil {
+		fmt.Fprintf(os.Stderr, "[*] headless filter stats | dropped requests: %d | skipped page bodies: %d\n",
+			filterStats.droppedRequests.Load(), filterStats.skippedPages.Load())
+	}
+}
+
+func startInteractiveStats(statusDone <-chan struct{}, processed *atomic.Int64, total int64, startTime time.Time, headlessEnabled bool, headlessContentFilter string, filterStats *headlessFilterStats) func() {
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return func() {}
+	}
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return func() {}
+	}
+
+	var once sync.Once
+	restore := func() {
+		once.Do(func() {
+			_ = term.Restore(fd, oldState)
+			fmt.Fprintln(os.Stderr)
+		})
+	}
+
+	fmt.Fprintln(os.Stderr, "[*] interactive mode: press 's' for live stats")
+
+	go func() {
+		defer restore()
+		reader := bufio.NewReader(os.Stdin)
+		for {
+			select {
+			case <-statusDone:
+				return
+			default:
+			}
+
+			b, err := reader.ReadByte()
+			if err != nil {
+				return
+			}
+			if b == 's' || b == 'S' {
+				printLiveStats(processed.Load(), total, startTime, headlessEnabled, headlessContentFilter, filterStats)
+			}
+		}
+	}()
+
+	return restore
 }
 
 // ((?:[a-zA-Z]{1,10}://|//)           # Match a scheme [a-Z]*1-10 or //
@@ -90,17 +253,18 @@ var internalJSON = `{
 
 func parseInternalJSON() []patternDef {
 	var raw map[string]string
-	var patterns []patternDef
 	if err := json.Unmarshal([]byte(internalJSON), &raw); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to parse internal JSON: %v\n", err)
 		return nil
 	}
-	patterns = make([]patternDef, 0, len(raw))
+	patterns := make([]patternDef, 0, len(raw))
 	for k, v := range raw {
-		patterns = append(patterns, patternDef{
-			Name:  k,
-			Regex: v,
-		})
+		r, err := regexp.Compile(v)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "skipping pattern %q: invalid regex: %v\n", k, err)
+			continue
+		}
+		patterns = append(patterns, patternDef{Name: k, Compiled: r})
 	}
 	return patterns
 }
@@ -116,12 +280,14 @@ func loadPatternsFromJSON(filePath string) []patternDef {
 		fmt.Fprintf(os.Stderr, "failed to parse JSON file: %v\n", err)
 		return nil
 	}
-	var patterns []patternDef
+	patterns := make([]patternDef, 0, len(raw))
 	for k, v := range raw {
-		patterns = append(patterns, patternDef{
-			Name:  k,
-			Regex: v,
-		})
+		r, err := regexp.Compile(v)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "skipping pattern %q: invalid regex: %v\n", k, err)
+			continue
+		}
+		patterns = append(patterns, patternDef{Name: k, Compiled: r})
 	}
 	return patterns
 }
@@ -203,72 +369,320 @@ func substringGrep(content string, baseURL string, substrings []string, matchInf
 	return result
 }
 
-func getRenderedContentWithPlaywright(fullurl string, header string, timeout time.Duration) (string, int, error) {
+// browserWorker owns a single Chromium browser process and reuses it across
+// multiple URL fetches. Each fetch opens a fresh context+page (tab) and closes
+// it afterwards. When the configured request count or runtime limit is reached
+// the browser is killed and a new one is launched transparently.
+type browserWorker struct {
+	pm          *playwrightManager
+	stats       *headlessFilterStats
+	browser     playwright.Browser
+	reqCount    int
+	startTime   time.Time
+	maxRequests int           // 0 = unlimited
+	maxRuntime  time.Duration // 0 = unlimited
+}
+
+type headlessFilterStats struct {
+	droppedRequests atomic.Int64
+	skippedPages    atomic.Int64
+}
+
+type playwrightManager struct {
+	mu          sync.RWMutex
+	pw          *playwright.Playwright
+	startTime   time.Time
+	launches    int
+	maxLaunches int
+	maxRuntime  time.Duration
+}
+
+var launchGate = make(chan struct{}, 1)
+
+func withLaunchGate(fn func() error) error {
+	launchGate <- struct{}{}
+	defer func() { <-launchGate }()
+	return fn()
+}
+
+func newPlaywrightManager(maxLaunches int, maxRuntime time.Duration) (*playwrightManager, error) {
+	pm := &playwrightManager{
+		maxLaunches: maxLaunches,
+		maxRuntime:  maxRuntime,
+	}
+	if err := pm.startLocked(); err != nil {
+		return nil, err
+	}
+	return pm, nil
+}
+
+func (pm *playwrightManager) startLocked() error {
 	pw, err := playwright.Run()
 	if err != nil {
-		return "", 0, fmt.Errorf("could not launch playwright: %v", err)
+		return err
 	}
-	defer pw.Stop()
+	pm.pw = pw
+	pm.startTime = time.Now()
+	pm.launches = 0
+	return nil
+}
 
-	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
-		Headless: playwright.Bool(true),
+func (pm *playwrightManager) stop() {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if pm.pw != nil {
+		pm.pw.Stop()
+		pm.pw = nil
+	}
+}
+
+func (pm *playwrightManager) maybeRestartLocked() error {
+	restartByLaunches := pm.maxLaunches > 0 && pm.launches >= pm.maxLaunches
+	restartByRuntime := pm.maxRuntime > 0 && time.Since(pm.startTime) >= pm.maxRuntime
+	if !restartByLaunches && !restartByRuntime {
+		return nil
+	}
+
+	if pm.pw != nil {
+		pm.pw.Stop()
+		pm.pw = nil
+	}
+	return pm.startLocked()
+}
+
+func (pm *playwrightManager) launchBrowser() (playwright.Browser, error) {
+	var browser playwright.Browser
+	err := withLaunchGate(func() error {
+		pm.mu.Lock()
+		defer pm.mu.Unlock()
+
+		if err := pm.maybeRestartLocked(); err != nil {
+			return fmt.Errorf("could not restart playwright: %v", err)
+		}
+		if pm.pw == nil {
+			return fmt.Errorf("playwright process is not running")
+		}
+
+		launched, err := pm.pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
+			Headless: playwright.Bool(true),
+			Args: []string{
+				"--disable-dev-shm-usage",
+			},
+		})
+		if err != nil {
+			return err
+		}
+		browser = launched
+		pm.launches++
+		return nil
 	})
 	if err != nil {
-		return "", 0, fmt.Errorf("could not launch browser: %v", err)
+		return nil, err
 	}
-	defer browser.Close()
+	return browser, nil
+}
 
-	// Create browser context with IgnoreHTTPSErrors set to true
-	context, err := browser.NewContext(playwright.BrowserNewContextOptions{
+func newBrowserWorker(pm *playwrightManager, stats *headlessFilterStats, maxRequests int, maxRuntime time.Duration) (*browserWorker, error) {
+	bw := &browserWorker{
+		pm:          pm,
+		stats:       stats,
+		maxRequests: maxRequests,
+		maxRuntime:  maxRuntime,
+	}
+	if err := bw.launch(); err != nil {
+		return nil, err
+	}
+	return bw, nil
+}
+
+func (bw *browserWorker) launch() error {
+	const maxAttempts = 5
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		browser, err := bw.pm.launchBrowser()
+		if err == nil {
+			bw.browser = browser
+			bw.reqCount = 0
+			bw.startTime = time.Now()
+			return nil
+		}
+
+		lastErr = err
+		if attempt == maxAttempts {
+			break
+		}
+
+		backoff := time.Duration(1<<(attempt-1)) * time.Second
+		jitter := time.Duration(rand.Int63n(int64(backoff / 2)))
+		time.Sleep(backoff + jitter)
+	}
+
+	return fmt.Errorf("could not launch browser after %d attempts: %v", maxAttempts, lastErr)
+}
+
+func (bw *browserWorker) closeBrowser() {
+	if bw.browser != nil {
+		bw.browser.Close()
+		bw.browser = nil
+	}
+}
+
+func snapshotChromiumTmpArtifacts() map[string]struct{} {
+	artifacts := make(map[string]struct{})
+	entries, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		return artifacts
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".org.chromium.Chromium.") {
+			artifacts[os.TempDir()+"/"+name] = struct{}{}
+		}
+	}
+	return artifacts
+}
+
+func cleanupChromiumTmpArtifacts(before map[string]struct{}) {
+	entries, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to read temp dir for chromium cleanup: %v\n", err)
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, ".org.chromium.Chromium.") {
+			continue
+		}
+		path := os.TempDir() + "/" + name
+		if _, existedBefore := before[path]; existedBefore {
+			continue
+		}
+		if err := os.RemoveAll(path); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to remove chromium temp artifact %s: %v\n", path, err)
+		}
+	}
+}
+
+func (bw *browserWorker) needsRestart() bool {
+	if bw.maxRequests > 0 && bw.reqCount >= bw.maxRequests {
+		return true
+	}
+	if bw.maxRuntime > 0 && time.Since(bw.startTime) >= bw.maxRuntime {
+		return true
+	}
+	return false
+}
+
+func (bw *browserWorker) fetch(fullurl, header string, timeout time.Duration, contentFilterPreset string) (string, int, error) {
+	if bw.needsRestart() {
+		bw.closeBrowser()
+		if err := bw.launch(); err != nil {
+			return "", 0, fmt.Errorf("browser restart failed: %v", err)
+		}
+	}
+
+	browserCtx, err := bw.browser.NewContext(playwright.BrowserNewContextOptions{
 		IgnoreHttpsErrors: playwright.Bool(true),
 	})
 	if err != nil {
 		return "", 0, fmt.Errorf("could not create browser context: %v", err)
 	}
-	defer context.Close()
 
-	page, err := context.NewPage()
+	err = browserCtx.Route("**/*", func(route playwright.Route) {
+		if shouldAbortHeadlessRequest(route.Request(), contentFilterPreset) {
+			if abortErr := route.Abort(); abortErr != nil {
+				_ = route.Continue()
+			} else if bw.stats != nil {
+				bw.stats.droppedRequests.Add(1)
+			}
+			return
+		}
+		_ = route.Continue()
+	})
 	if err != nil {
+		browserCtx.Close()
+		return "", 0, fmt.Errorf("could not set route filter: %v", err)
+	}
+
+	page, err := browserCtx.NewPage()
+	if err != nil {
+		browserCtx.Close()
 		return "", 0, fmt.Errorf("could not create page: %v", err)
 	}
 
-	// Set custom header if provided
 	if header != "" {
 		parts := strings.SplitN(header, ":", 2)
 		if len(parts) == 2 {
-			err := page.SetExtraHTTPHeaders(map[string]string{
+			if err := page.SetExtraHTTPHeaders(map[string]string{
 				strings.TrimSpace(parts[0]): strings.TrimSpace(parts[1]),
-			})
-			if err != nil {
+			}); err != nil {
+				browserCtx.Close()
 				return "", 0, fmt.Errorf("could not set headers: %v", err)
 			}
 		}
 	}
 
-	// Navigate and capture the response
-	response, err := page.Goto(fullurl, playwright.PageGotoOptions{
-		Timeout:   playwright.Float(float64(timeout.Milliseconds())),
-		WaitUntil: playwright.WaitUntilStateNetworkidle,
-	})
-	if err != nil {
-		return "", 0, fmt.Errorf("could not navigate to page: %v", err)
+	type fetchResult struct {
+		content string
+		status  int
+		err     error
+	}
+	// Buffered so the goroutine never blocks when we have already timed out.
+	resultCh := make(chan fetchResult, 1)
+
+	go func() {
+		response, err := page.Goto(fullurl, playwright.PageGotoOptions{
+			// Pass the same timeout to playwright as well; the Go-level timer
+			// below is the authoritative hard deadline.
+			Timeout:   playwright.Float(float64(timeout.Milliseconds())),
+			WaitUntil: playwright.WaitUntilStateNetworkidle,
+		})
+		if err != nil {
+			resultCh <- fetchResult{err: fmt.Errorf("navigation failed: %v", err)}
+			return
+		}
+		status := response.Status()
+		contentType, _ := response.HeaderValue("content-type")
+		if shouldSkipHeadlessContent(contentType, contentFilterPreset) {
+			if bw.stats != nil {
+				bw.stats.skippedPages.Add(1)
+			}
+			resultCh <- fetchResult{status: status, content: ""}
+			return
+		}
+		content, err := page.Content()
+		if err != nil {
+			resultCh <- fetchResult{status: status, err: fmt.Errorf("could not get page content: %v", err)}
+			return
+		}
+		resultCh <- fetchResult{content: content, status: status}
+	}()
+
+	var r fetchResult
+	select {
+	case r = <-resultCh:
+		// completed within the deadline — fall through to cleanup below
+
+	case <-time.After(timeout):
+		// Hard timeout: closing the page unblocks the goroutine (Goto/Content
+		// will return with an error), which then writes to the buffered channel
+		// and exits cleanly — no goroutine leak.
+		page.Close()
+		browserCtx.Close()
+		bw.reqCount++
+		return "", 0, fmt.Errorf("hard timeout (%s) exceeded for %s", timeout, fullurl)
 	}
 
-	// Get status code
-	status := response.Status()
-
-	// Get the rendered content
-	content, err := page.Content()
-	if err != nil {
-		return "", status, fmt.Errorf("could not get page content: %v", err)
+	browserCtx.Close()
+	bw.reqCount++
+	if r.err != nil {
+		return "", r.status, r.err
 	}
-
-	return content, status, nil
+	return r.content, r.status, nil
 }
 
-func request(fullurl, header string, timeout time.Duration) (string, *http.Response) {
-	ua := userAgents[rand.Intn(len(userAgents))]
-
+func newHTTPClient(timeout time.Duration) *http.Client {
 	t := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		DialContext: (&net.Dialer{
@@ -278,13 +692,17 @@ func request(fullurl, header string, timeout time.Duration) (string, *http.Respo
 		TLSHandshakeTimeout: timeout,
 		DisableKeepAlives:   true,
 	}
-	client := &http.Client{
+	return &http.Client{
 		Timeout:   timeout,
 		Transport: t,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
+}
+
+func request(client *http.Client, fullurl, header string) (string, *http.Response) {
+	ua := userAgents[rand.Intn(len(userAgents))]
 
 	req, err := http.NewRequest("GET", fullurl, nil)
 	if err != nil {
@@ -311,7 +729,6 @@ func request(fullurl, header string, timeout time.Duration) (string, *http.Respo
 		fmt.Fprintf(os.Stderr, "failed reading body: %v\n", err)
 		return "", resp
 	}
-	//print(string(body))
 	return string(body), resp
 }
 
@@ -320,11 +737,7 @@ func regexGrep(content string, baseURL string, patterns []patternDef, resolvePat
 	var result []string
 
 	for _, p := range patterns {
-		r := regexp.MustCompile(p.Regex)
-		//fmt.Println(content)
-		// fmt.Println("Regex: ", r.String())
-		matches := r.FindAllStringIndex(content, -1) //r.FindAllString(content, -1)
-		//fmt.Println(matches)
+		matches := p.Compiled.FindAllStringIndex(content, -1)
 
 		for _, matchIdx := range matches {
 			start, end := matchIdx[0], matchIdx[1]
@@ -343,7 +756,7 @@ func regexGrep(content string, baseURL string, patterns []patternDef, resolvePat
 					}
 
 				} else {
-					if strings.HasPrefix(m, "//"){
+					if strings.HasPrefix(m, "//") {
 						fmt.Printf("https:%s\n", m)
 					} else {
 						fmt.Println(m)
@@ -393,8 +806,19 @@ func main() {
 	var concurrency int
 	var input string
 	var resolvePath bool
-	var noHeadlessMode bool
+	var headlessMode bool
+	var preflightHeadlessMode bool
+	var headlessRequestsRestart int
+	var headlessTimeRestart int
+	var headlessPWLaunchRestart int
+	var headlessPWTimeRestart int
 	var substringsFilePath string
+	var noTmpCleanup bool
+	var headlessContentFilter string
+	var showVersion bool
+	var showStats bool
+	var chromiumTmpBefore map[string]struct{}
+	var filterStats headlessFilterStats
 
 	flag.IntVar(&timeout, "timeout", 5, "Timeout in seconds for HTTP requests")
 	flag.StringVar(&jsonFilePath, "json", "", "Path to JSON file containing additional regex patterns")
@@ -404,9 +828,33 @@ func main() {
 	flag.IntVar(&concurrency, "c", 3, "Concurrency level")
 	flag.StringVar(&input, "u", "", "URL or file path to process")
 	flag.BoolVar(&resolvePath, "r", false, "Resolve relative paths against base URL")
-	flag.BoolVar(&noHeadlessMode, "noheadless", false, "Disables headless mode")
+	flag.BoolVar(&headlessMode, "headless", false, "Enable headless browser mode (Playwright/Chromium) for JavaScript-rendered pages")
+	flag.BoolVar(&preflightHeadlessMode, "headless-preflight", false, "Run HTTP preflight scan first; only run headless scan when preflight finds no matches (implies headless fallback)")
+	flag.IntVar(&headlessRequestsRestart, "headless-requests-restart", 250, "Restart each browser process after this many requests (0 = never)")
+	flag.IntVar(&headlessTimeRestart, "headless-time-restart", 900, "Restart each browser process after this many seconds of runtime (0 = never)")
+	flag.IntVar(&headlessPWLaunchRestart, "headless-pw-restart-launches", 1000, "Restart the shared Playwright process after this many browser launches (0 = never)")
+	flag.IntVar(&headlessPWTimeRestart, "headless-pw-restart-seconds", 10800, "Restart the shared Playwright process after this many seconds of runtime (0 = never)")
+	flag.StringVar(&headlessContentFilter, "headless-content-filter", "drop-binary", "Headless response content-type filter preset: drop-binary or off")
+	flag.BoolVar(&noTmpCleanup, "no-tmp-cleanup", false, "Disable cleanup of Chromium temp artifacts in /tmp after headless runs")
+	flag.BoolVar(&showVersion, "version", false, "Print tool version and exit")
+	flag.BoolVar(&showStats, "stats", false, "Print live status and progress information to stderr")
 	flag.StringVar(&substringsFilePath, "substrings", "", "Path to newline-delimited text file of plain substrings to match (# lines and empty lines are ignored)")
+	if len(os.Args) == 1 {
+		fmt.Fprintln(os.Stderr, "error: no parameters provided")
+		flag.Usage()
+		os.Exit(1)
+	}
 	flag.Parse()
+	if showVersion {
+		fmt.Println(version)
+		return
+	}
+
+	headlessEnabled := headlessMode || preflightHeadlessMode
+	if _, ok := headlessContentTypeFilterPresets[headlessContentFilter]; !ok {
+		fmt.Fprintf(os.Stderr, "invalid -headless-content-filter %q (allowed: drop-binary, off)\n", headlessContentFilter)
+		os.Exit(1)
+	}
 
 	allPatterns := parseInternalJSON()
 	if jsonFilePath != "" {
@@ -422,53 +870,135 @@ func main() {
 		substrings = loadSubstringsFromFile(substringsFilePath)
 	}
 
+	// Start a single Playwright server process shared across all browser workers.
+	var pm *playwrightManager
+	if headlessEnabled {
+		chromiumTmpBefore = snapshotChromiumTmpArtifacts()
+		var err error
+		pm, err = newPlaywrightManager(headlessPWLaunchRestart, time.Duration(headlessPWTimeRestart)*time.Second)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "could not start playwright: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// Collect all URLs upfront so we know the total for progress reporting.
+	var allURLs []string
+	if fileInfo, err := os.Stat(input); err == nil && !fileInfo.IsDir() {
+		f, err := os.Open(input)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to open file: %v\n", err)
+			os.Exit(1)
+		}
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line != "" {
+				allURLs = append(allURLs, line)
+			}
+		}
+		f.Close()
+	} else {
+		allURLs = []string{input}
+	}
+	total := int64(len(allURLs))
+
 	urlList := make(chan string, concurrency)
 	go func() {
-		if fileInfo, err := os.Stat(input); err == nil && !fileInfo.IsDir() {
-			f, err := os.Open(input)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to open file: %v\n", err)
-				close(urlList)
-				return
-			}
-			scanner := bufio.NewScanner(f)
-			for scanner.Scan() {
-				urlList <- scanner.Text()
-			}
-			f.Close()
-			close(urlList)
-		} else {
-			urlList <- input
-			close(urlList)
+		for _, u := range allURLs {
+			urlList <- u
 		}
+		close(urlList)
 	}()
 
+	// Progress reporter: prints to stderr every second, overwrites the line.
+	var processed atomic.Int64
+	startTime := time.Now()
+	var statusDone chan struct{}
+	var statusStopped chan struct{}
+	if showStats {
+		statusDone = make(chan struct{})
+		statusStopped = make(chan struct{})
+		restoreInteractive := startInteractiveStats(statusDone, &processed, total, startTime, headlessEnabled, headlessContentFilter, &filterStats)
+		defer restoreInteractive()
+		go func() {
+			defer close(statusStopped)
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					n := processed.Load()
+					elapsed, etaStr := progressSnapshot(n, total, startTime)
+					fmt.Fprintf(os.Stderr, "\r[*] %d/%d urls | uptime: %s | eta: %s    ",
+						n, total, elapsed, etaStr)
+				case <-statusDone:
+					return
+				}
+			}
+		}()
+	}
+
 	wg := sync.WaitGroup{}
-	var content = ""
-	var err error
 
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for inputURL := range urlList {
 
-				if noHeadlessMode {
-					content, _ = request(inputURL, header, time.Duration(timeout)*time.Second)
-				} else {
-					content, _, err = getRenderedContentWithPlaywright(inputURL, header, time.Duration(timeout)*time.Second)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "playwright error: %v\n", err)
-						continue
-					}
+			// Each goroutine owns one HTTP client and one browser instance (headless mode).
+			timeoutDur := time.Duration(timeout) * time.Second
+			httpClient := newHTTPClient(timeoutDur)
+
+			var bw *browserWorker
+			if headlessEnabled {
+				var err error
+				maxRuntime := time.Duration(headlessTimeRestart) * time.Second
+				bw, err = newBrowserWorker(pm, &filterStats, headlessRequestsRestart, maxRuntime)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "could not create browser worker: %v\n", err)
+					return
 				}
-				// Use plain-substring matching if a substrings file was provided,
-				// otherwise fall back to regex matching
+				defer bw.closeBrowser()
+			}
+
+			for inputURL := range urlList {
+				var content string
+				runMatch := func(pageContent string) []string {
+					if len(substrings) > 0 {
+						return substringGrep(pageContent, inputURL, substrings, matchInformation)
+					}
+					return regexGrep(pageContent, inputURL, allPatterns, resolvePath, matchInformation)
+				}
+
 				var matches []string
-				if len(substrings) > 0 {
-					matches = substringGrep(content, inputURL, substrings, matchInformation)
+
+				if preflightHeadlessMode {
+					content, _ = request(httpClient, inputURL, header)
+					matches = runMatch(content)
+
+					if len(matches) == 0 {
+						var err error
+						content, _, err = bw.fetch(inputURL, header, timeoutDur, headlessContentFilter)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, "browser fetch error: %v\n", err)
+							continue
+						}
+						matches = runMatch(content)
+					}
 				} else {
-					matches = regexGrep(content, inputURL, allPatterns, resolvePath, matchInformation)
+					if headlessEnabled {
+						var err error
+						content, _, err = bw.fetch(inputURL, header, timeoutDur, headlessContentFilter)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, "browser fetch error: %v\n", err)
+							continue
+						}
+					} else {
+						content, _ = request(httpClient, inputURL, header)
+					}
+
+					matches = runMatch(content)
 				}
 
 				if checkStatus {
@@ -485,14 +1015,34 @@ func main() {
 							u = base.ResolveReference(u)
 						}
 
-						_, resp := request(u.String(), header, time.Duration(timeout)*time.Second)
+						_, resp := request(httpClient, u.String(), header)
 						if resp != nil {
 							fmt.Printf("[Status] %s -> %d\n", u.String(), resp.StatusCode)
 						}
 					}
 				}
+
+				processed.Add(1)
 			}
 		}()
 	}
 	wg.Wait()
+	if headlessEnabled {
+		pm.stop()
+		if !noTmpCleanup {
+			cleanupChromiumTmpArtifacts(chromiumTmpBefore)
+		}
+	}
+
+	if showStats {
+		close(statusDone)
+		<-statusStopped
+		elapsed, _ := progressSnapshot(processed.Load(), total, startTime)
+		fmt.Fprintf(os.Stderr, "\r[*] %d/%d urls | uptime: %s | done\n",
+			processed.Load(), total, elapsed)
+		if headlessEnabled && headlessContentFilter != "off" {
+			fmt.Fprintf(os.Stderr, "[*] headless filter stats | dropped requests: %d | skipped page bodies: %d\n",
+				filterStats.droppedRequests.Load(), filterStats.skippedPages.Load())
+		}
+	}
 }
