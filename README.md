@@ -5,26 +5,45 @@
 Yet another regex pattern detection tool that comes along with built-in headless support with playwright-go.
 
 ```
-Usage:
+Usage of regexr:
   -H string
-        Custom header, e.g., -H 'User-Agent: xyz' (default "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36")
+    	Custom header, e.g., -H 'User-Agent: xyz' (default "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36")
   -c int
-        Concurrency level (default 3)
+    	Concurrency level (default 3)
   -checkstatus
-        Check and print HTTP status of discovered links
+    	Check and print HTTP status of discovered links
+  -headless
+    	Enable headless browser mode (Playwright/Chromium) for JavaScript-rendered pages
+  -headless-content-filter string
+    	Headless response content-type filter preset: drop-binary or off (default "drop-binary")
+  -headless-preflight
+    	Run HTTP preflight scan first; only run headless scan when preflight finds no matches (implies headless fallback)
+  -headless-pw-restart-launches int
+    	Restart the shared Playwright process after this many browser launches (0 = never) (default 1000)
+  -headless-pw-restart-seconds int
+    	Restart the shared Playwright process after this many seconds of runtime (0 = never) (default 10800)
+  -headless-requests-restart int
+    	Restart each browser process after this many requests (0 = never) (default 250)
+  -headless-time-restart int
+    	Restart each browser process after this many seconds of runtime (0 = never) (default 900)
   -json string
-        Path to JSON file containing additional regex patterns
+    	Path to JSON file containing additional regex patterns
   -matchInfo
-        Print more information about a match
-  -noheadless
-        Disables headless mode
-  -r    Resolve relative paths against base URL
+    	Print more information about a match
+  -no-tmp-cleanup
+    	Disable cleanup of Chromium temp artifacts in /tmp after headless runs
+  -r	Resolve relative paths against base URL
+  -stats
+    	Print live status and progress information to stderr
   -substrings string
-        Path to newline-delimited text file of plain substrings to match (# lines and empty lines are ignored)
+    	Path to newline-delimited text file of plain substrings to match (# lines and empty lines are ignored)
   -timeout int
-        Timeout in seconds for HTTP requests (default 5)
+    	Timeout in seconds for HTTP requests (default 5)
   -u string
-        URL or file path to process
+    	URL or file path to process
+  -version
+    	Print tool version and exit
+
 ```
 
 Externally specified regex json file should look like:
