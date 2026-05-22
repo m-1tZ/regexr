@@ -1,6 +1,6 @@
 module github.com/m-1tZ/regexr
 
-go 1.24.2
+go 1.22
 
 require (
 	github.com/playwright-community/playwright-go v0.5700.1
