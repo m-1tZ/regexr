@@ -224,12 +224,12 @@ func startInteractiveStats(statusDone <-chan struct{}, processed *atomic.Int64, 
 // "jsleak-linkfinder5": "(?:\"|')?([a-zA-Z0-9_\\-]{1,}\\.(php|asp|aspx|jsp|json|action|html|js|txt|xml)(?:[\\?|#][^\"|']{0,}|))(?:\"|')?"
 
 var internalJSON = `{
-	"jsleak-linkfinder1": "(?:\"|')?(([a-zA-Z]{1,10}:\\/\\/|\\/\\/)[^\"'\\/]{1,}\\.[a-zA-Z]{2,}[^\"']{0,})(?:\"|')?",
+	"jsleak-linkfinder1": "(?:\"|')?(([a-zA-Z]{1,10}:\\/\\/|\\/\\/)[^\"'\\/\\s]{1,}\\.[a-zA-Z]{2,}[^\\s\"'<>]{0,})(?:\"|')?",
 	"jsleak-linkfinder3": "(?:\"|')?([a-zA-Z0-9_\\-\\/]{1,}\\/[a-zA-Z0-9_\\-\\/.]{1,}\\.(?:[a-zA-Z]{1,4}|action)(?:[\\?|#][^\"|']{0,}|))(?:\"|')?",
 	"jsleak-linkfinder4": "(?:\"|')?([a-zA-Z0-9_\\-\\/]{1,}\\/[a-zA-Z0-9_\\-\\/]{3,}([\\?|#][^\"|']{0,}|))(?:\"|')?",
 	"jsleak-linkfinder5": "(?:\"|')?([a-zA-Z0-9_\\-]{1,}\\.(php|asp|aspx|jsp|json|action|html|js|txt|xml)(?:[\\?|#][^\"|']{0,}|))(?:\"|')?",
 	"pathfinder": "(?:\"|')((?:\\/|\\.\\.\\/|\\.\\/)[^\"'><,;|()\\s]+)(?:\"|')",
-	"uri1": "(https?:\\/\\/|\\/\\/)([a-zA-Z0-9\\-_\\.@]{3,256})?(\\/[^\\s\"'<>]*)?",
+	"uri1": "(https?:\\/\\/|\\/\\/)([a-zA-Z0-9\\-_\\.@]{3,256})(\\/[^\\s\"'<>]*)?",
 	"uri2": "[a-zA-Z]{3,10}://([a-zA-Z0-9\\-_\\.@]{3,256})?(\\/[^\\s\"'<>]*)?",
 	"password_in_url": "[a-zA-Z]{3,10}://[^/\\s:@]{3,20}:[^/\\s:@]{3,20}@.{1,100}[\"'\\s]",
 	"amazon1": "//s3-[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9._-]+",
@@ -386,6 +386,48 @@ type browserWorker struct {
 type headlessFilterStats struct {
 	droppedRequests atomic.Int64
 	skippedPages    atomic.Int64
+}
+
+type resourceEntry struct {
+	url  string
+	body string
+}
+
+type resourceCapture struct {
+	mu      sync.Mutex
+	entries []resourceEntry
+	baseURL string
+}
+
+func (rc *resourceCapture) add(u, body string) {
+	rc.mu.Lock()
+	rc.entries = append(rc.entries, resourceEntry{url: u, body: body})
+	rc.mu.Unlock()
+}
+
+// registeredDomain returns the last two hostname labels (e.g. "example.com" from
+// "login.example.com") used for same-site resource filtering.
+func registeredDomain(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	parts := strings.Split(host, ".")
+	if len(parts) < 2 {
+		return host
+	}
+	return strings.Join(parts[len(parts)-2:], ".")
+}
+
+func isSameSite(baseURL, resourceURL string) bool {
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	res, err := url.Parse(resourceURL)
+	if err != nil {
+		return false
+	}
+	return registeredDomain(base.Hostname()) == registeredDomain(res.Hostname())
 }
 
 type playwrightManager struct {
@@ -574,7 +616,7 @@ func (bw *browserWorker) needsRestart() bool {
 	return false
 }
 
-func (bw *browserWorker) fetch(fullurl, header string, timeout time.Duration, contentFilterPreset string) (string, int, error) {
+func (bw *browserWorker) fetch(fullurl, header string, timeout time.Duration, contentFilterPreset string, rc *resourceCapture) (string, int, error) {
 	if bw.needsRestart() {
 		bw.closeBrowser()
 		if err := bw.launch(); err != nil {
@@ -609,6 +651,22 @@ func (bw *browserWorker) fetch(fullurl, header string, timeout time.Duration, co
 	if err != nil {
 		browserCtx.Close()
 		return "", 0, fmt.Errorf("could not create page: %v", err)
+	}
+
+	var capturedResponses []playwright.Response
+	var capturedMu sync.Mutex
+	if rc != nil {
+		page.On("response", func(resp playwright.Response) {
+			if strings.ToLower(resp.Request().ResourceType()) == "document" {
+				return
+			}
+			if !isSameSite(rc.baseURL, resp.URL()) {
+				return
+			}
+			capturedMu.Lock()
+			capturedResponses = append(capturedResponses, resp)
+			capturedMu.Unlock()
+		})
 	}
 
 	if header != "" {
@@ -655,6 +713,23 @@ func (bw *browserWorker) fetch(fullurl, header string, timeout time.Duration, co
 		if err != nil {
 			resultCh <- fetchResult{status: status, err: fmt.Errorf("could not get page content: %v", err)}
 			return
+		}
+		if rc != nil {
+			capturedMu.Lock()
+			respCopy := make([]playwright.Response, len(capturedResponses))
+			copy(respCopy, capturedResponses)
+			capturedMu.Unlock()
+			for _, resp := range respCopy {
+				ct, _ := resp.HeaderValue("content-type")
+				if shouldSkipHeadlessContent(ct, contentFilterPreset) {
+					continue
+				}
+				body, bodyErr := resp.Body()
+				if bodyErr != nil || len(body) == 0 {
+					continue
+				}
+				rc.add(resp.URL(), string(body))
+			}
 		}
 		resultCh <- fetchResult{content: content, status: status}
 	}()
@@ -817,6 +892,7 @@ func main() {
 	var headlessContentFilter string
 	var showVersion bool
 	var showStats bool
+	var resourcesMode bool
 	var chromiumTmpBefore map[string]struct{}
 	var filterStats headlessFilterStats
 
@@ -839,6 +915,7 @@ func main() {
 	flag.BoolVar(&showVersion, "version", false, "Print tool version and exit")
 	flag.BoolVar(&showStats, "stats", false, "Print live status and progress information to stderr")
 	flag.StringVar(&substringsFilePath, "substrings", "", "Path to newline-delimited text file of plain substrings to match (# lines and empty lines are ignored)")
+	flag.BoolVar(&resourcesMode, "resources", false, "Also scan same-site resources (JS, CSS, etc.) loaded by the page (requires -headless or -headless-preflight)")
 	if len(os.Args) == 1 {
 		fmt.Fprintln(os.Stderr, "error: no parameters provided")
 		flag.Usage()
@@ -851,6 +928,10 @@ func main() {
 	}
 
 	headlessEnabled := headlessMode || preflightHeadlessMode
+	if resourcesMode && !headlessEnabled {
+		fmt.Fprintln(os.Stderr, "error: -resources requires -headless or -headless-preflight")
+		os.Exit(1)
+	}
 	if _, ok := headlessContentTypeFilterPresets[headlessContentFilter]; !ok {
 		fmt.Fprintf(os.Stderr, "invalid -headless-content-filter %q (allowed: drop-binary, off)\n", headlessContentFilter)
 		os.Exit(1)
@@ -964,32 +1045,37 @@ func main() {
 
 			for inputURL := range urlList {
 				var content string
-				runMatch := func(pageContent string) []string {
+				runMatch := func(pageContent, baseURL string) []string {
 					if len(substrings) > 0 {
-						return substringGrep(pageContent, inputURL, substrings, matchInformation)
+						return substringGrep(pageContent, baseURL, substrings, matchInformation)
 					}
-					return regexGrep(pageContent, inputURL, allPatterns, resolvePath, matchInformation)
+					return regexGrep(pageContent, baseURL, allPatterns, resolvePath, matchInformation)
+				}
+
+				var rc *resourceCapture
+				if resourcesMode {
+					rc = &resourceCapture{baseURL: inputURL}
 				}
 
 				var matches []string
 
 				if preflightHeadlessMode {
 					content, _ = request(httpClient, inputURL, header)
-					matches = runMatch(content)
+					matches = runMatch(content, inputURL)
 
 					if len(matches) == 0 {
 						var err error
-						content, _, err = bw.fetch(inputURL, header, timeoutDur, headlessContentFilter)
+						content, _, err = bw.fetch(inputURL, header, timeoutDur, headlessContentFilter, rc)
 						if err != nil {
 							fmt.Fprintf(os.Stderr, "browser fetch error: %v\n", err)
 							continue
 						}
-						matches = runMatch(content)
+						matches = runMatch(content, inputURL)
 					}
 				} else {
 					if headlessEnabled {
 						var err error
-						content, _, err = bw.fetch(inputURL, header, timeoutDur, headlessContentFilter)
+						content, _, err = bw.fetch(inputURL, header, timeoutDur, headlessContentFilter, rc)
 						if err != nil {
 							fmt.Fprintf(os.Stderr, "browser fetch error: %v\n", err)
 							continue
@@ -998,7 +1084,14 @@ func main() {
 						content, _ = request(httpClient, inputURL, header)
 					}
 
-					matches = runMatch(content)
+					matches = runMatch(content, inputURL)
+				}
+
+				if rc != nil {
+					for _, entry := range rc.entries {
+						resourceMatches := runMatch(entry.body, entry.url)
+						matches = append(matches, resourceMatches...)
+					}
 				}
 
 				if checkStatus {

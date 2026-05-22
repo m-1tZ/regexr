@@ -33,6 +33,8 @@ Usage of regexr:
   -no-tmp-cleanup
     	Disable cleanup of Chromium temp artifacts in /tmp after headless runs
   -r	Resolve relative paths against base URL
+  -resources
+		Also scan same-site resources (JS, CSS, etc.) loaded by the page (requires -headless or -headless-preflight)
   -stats
     	Print live status and progress information to stderr
   -substrings string
@@ -49,12 +51,12 @@ Usage of regexr:
 Externally specified regex json file should look like:
 ```json
 {
-	"jsleak-linkfinder1": "(?:\"|')?(([a-zA-Z]{1,10}:\\/\\/|\\/\\/)[^\"'\\/]{1,}\\.[a-zA-Z]{2,}[^\"']{0,})(?:\"|')?",
+	"jsleak-linkfinder1": "(?:\"|')?(([a-zA-Z]{1,10}:\\/\\/|\\/\\/)[^\"'\\/\\s]{1,}\\.[a-zA-Z]{2,}[^\\s\"'<>]{0,})(?:\"|')?",
 	"jsleak-linkfinder3": "(?:\"|')?([a-zA-Z0-9_\\-\\/]{1,}\\/[a-zA-Z0-9_\\-\\/.]{1,}\\.(?:[a-zA-Z]{1,4}|action)(?:[\\?|#][^\"|']{0,}|))(?:\"|')?",
 	"jsleak-linkfinder4": "(?:\"|')?([a-zA-Z0-9_\\-\\/]{1,}\\/[a-zA-Z0-9_\\-\\/]{3,}([\\?|#][^\"|']{0,}|))(?:\"|')?",
 	"jsleak-linkfinder5": "(?:\"|')?([a-zA-Z0-9_\\-]{1,}\\.(php|asp|aspx|jsp|json|action|html|js|txt|xml)(?:[\\?|#][^\"|']{0,}|))(?:\"|')?",
 	"pathfinder": "(?:\"|')((?:\\/|\\.\\.\\/|\\.\\/)[^\"'><,;|()\\s]+)(?:\"|')",
-	"uri1": "(https?:\\/\\/|\\/\\/)([a-zA-Z0-9\\-_\\.@]{3,256})?(\\/[^\\s\"'<>]*)?",
+	"uri1": "(https?:\\/\\/|\\/\\/)([a-zA-Z0-9\\-_\\.@]{3,256})(\\/[^\\s\"'<>]*)?",
 	"uri2": "[a-zA-Z]{3,10}://([a-zA-Z0-9\\-_\\.@]{3,256})?(\\/[^\\s\"'<>]*)?",
 	"password_in_url": "[a-zA-Z]{3,10}://[^/\\s:@]{3,20}:[^/\\s:@]{3,20}@.{1,100}[\"'\\s]",
 	"amazon1": "//s3-[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9._-]+",
